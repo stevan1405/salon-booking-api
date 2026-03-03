@@ -1,6 +1,6 @@
 import "dotenv/config";
 import express from "express";
-import { getAuthUrl, getOAuthClient, saveToken } from "./calendar/googleAuth.js";
+import { getAuthUrl, handleOAuthCallback } from "./calendar/googleAuth.js";
 import { phase3Handle } from "./phase3.js";
 import { phase3Confirm } from "./phase3Confirm.js";
 import { phase3Change } from "./phase3Change.js";
@@ -21,22 +21,16 @@ app.get("/", (req, res) => {
   res.send('OK. Try /health or /auth');
 });
 
-// OAuth start
-//app.get("/auth", (req, res) => {
-//  res.redirect(getAuthUrl());
-//});
-
 app.get("/auth", (req, res) => {
   try {
-    const url = getAuthUrl();
-    return res.redirect(url);
+    return res.redirect(getAuthUrl());
   } catch (e) {
     console.error("[/auth] failed:", e?.stack || e);
-    return res.status(500).send(`Auth setup error: ${String(e?.message || e)}`);
+    return res.status(500).send(String(e?.message || e));
   }
 });
 
-// OAuth callback
+// IMPORTANT: this path MUST match GOOGLE_REDIRECT_URI's path
 app.get("/oauth2callback", async (req, res) => {
   try {
     const code = req.query.code;

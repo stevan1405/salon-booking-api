@@ -1,6 +1,5 @@
 // src/calendar/googleAuth.js
 import { google } from "googleapis";
-//import { redis } from "../redis.js";
 import { getRedis } from "../redis.js";
 
 const TOKEN_KEY = process.env.GCAL_TOKEN_KEY || "gcal:token";
@@ -14,8 +13,7 @@ function must(name) {
 export function getOAuthClient() {
   const clientId = must("GOOGLE_CLIENT_ID");
   const clientSecret = must("GOOGLE_CLIENT_SECRET");
-  const redirectUri = must("GOOGLE_REDIRECT_URI"); // must match Google Cloud redirect URIs
-
+  const redirectUri = must("GOOGLE_REDIRECT_URI");
   return new google.auth.OAuth2(clientId, clientSecret, redirectUri);
 }
 
@@ -33,6 +31,7 @@ export async function saveToken(token) {
   return true;
 }
 
+// ✅ This is what googleCalendar.js calls
 export async function getAuthorizedClient() {
   const oAuth2Client = getOAuthClient();
   const token = await loadToken();
@@ -41,29 +40,22 @@ export async function getAuthorizedClient() {
   return oAuth2Client;
 }
 
+// ✅ This is what /auth route uses
 export function getAuthUrl() {
   const oAuth2Client = getOAuthClient();
-
-  // keep scopes minimal for your use case
   const scopes = ["https://www.googleapis.com/auth/calendar"];
 
   return oAuth2Client.generateAuthUrl({
     access_type: "offline",
-    prompt: "consent", // ensures refresh_token is issued (important!)
+    prompt: "consent",
     scope: scopes,
   });
 }
 
-/**
- * Exchange code -> token and store in Redis
- */
+// ✅ This is what your callback route should call
 export async function handleOAuthCallback(code) {
   const oAuth2Client = getOAuthClient();
   const { tokens } = await oAuth2Client.getToken(code);
-
-  // tokens should include refresh_token on first consent
   await saveToken(tokens);
-
-  oAuth2Client.setCredentials(tokens);
   return tokens;
 }
