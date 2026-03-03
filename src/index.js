@@ -22,22 +22,30 @@ app.get("/", (req, res) => {
 });
 
 // OAuth start
+//app.get("/auth", (req, res) => {
+//  res.redirect(getAuthUrl());
+//});
+
 app.get("/auth", (req, res) => {
-  res.redirect(getAuthUrl());
+  try {
+    const url = getAuthUrl();
+    return res.redirect(url);
+  } catch (e) {
+    console.error("[/auth] failed:", e?.stack || e);
+    return res.status(500).send(`Auth setup error: ${String(e?.message || e)}`);
+  }
 });
 
 // OAuth callback
 app.get("/oauth2callback", async (req, res) => {
   try {
     const code = req.query.code;
-    const oAuth2Client = getOAuthClient();
-    const { tokens } = await oAuth2Client.getToken(code);
-    saveToken(tokens);
-
+    if (!code) return res.status(400).send("Missing code");
+    await handleOAuthCallback(code);
     res.send("Google Calendar authorized. You can close this tab.");
-  } catch (err) {
-    console.error(err);
-    res.status(500).send("OAuth failed");
+  } catch (e) {
+    console.error("[/oauth2callback] failed:", e?.stack || e);
+    res.status(500).send(String(e?.message || e));
   }
 });
 
