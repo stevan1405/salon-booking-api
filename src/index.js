@@ -12,12 +12,11 @@ import { adminRouter } from "./admin.js";
 import { adminWipeRouter } from "./adminWipe.js";
 
 
-app.use("/admin", adminWipeRouter);
-
 const app = express();   // 🔥 THIS WAS MISSING
 app.use(express.json());
 
 app.use("/admin", adminRouter);
+app.use("/admin", adminWipeRouter);
 
 // Health route
 app.get("/health", (req, res) => {
