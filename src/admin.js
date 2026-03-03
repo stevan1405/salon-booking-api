@@ -101,42 +101,117 @@ adminRouter.get("/booking/:booking_ref", async (req, res) => {
 // requires you already store util:YYYY-MM-DD:sty_xx as JSON
 adminRouter.get("/util", async (req, res) => {
   try {
-    const { date, stylist_id } = req.query;
+    const date = String(req.query.date || "");
+    const stylistFilter = req.query.stylist_id ? String(req.query.stylist_id) : null;
     if (!date) return res.status(400).json({ error: "missing_date" });
 
-    // If stylist_id provided, return only that
-    if (stylist_id) {
-      const util = await getUtil(date, String(stylist_id));
-      return res.json({ ok: true, date, stylist_id, util });
+    const tz = process.env.SALON_TZ || "Africa/Harare";
+
+    // Helpers to format + compute in salon TZ
+    const fmtDate = new Intl.DateTimeFormat("en-CA", {
+      timeZone: tz,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    });
+
+    const fmtTime = new Intl.DateTimeFormat("en-GB", {
+      timeZone: tz,
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    });
+
+    const localDate = (iso) => fmtDate.format(new Date(iso)); // YYYY-MM-DD
+    const minutesBetween = (a, b) => Math.round((new Date(b) - new Date(a)) / 60000);
+
+    // 1) Load stylists (for names)
+    const stylUrl = `/v0/${baseId()}/${encTable("Stylists")}?pageSize=100`;
+    const stylData = await airtableFetch(stylUrl, { method: "GET" });
+    const stylists = (stylData.records || []).map((r) => ({ id: r.id, ...r.fields }));
+
+    const stylistById = new Map();
+    for (const s of stylists) {
+      if (s.stylist_id) stylistById.set(s.stylist_id, s);
     }
 
-    // Otherwise, pull stylists from Airtable and return util for each
+    // 2) Load bookings (confirmed only) and aggregate by stylist for the requested LOCAL date
+    // We'll fetch a broad set and then filter locally by timezone date.
     const params = new URLSearchParams();
     params.set("pageSize", "100");
-    const url = `/v0/${baseId()}/${encTable("Stylists")}?${params.toString()}`;
-    const data = await airtableFetch(url, { method: "GET" });
+    params.set("filterByFormula", `{status}="confirmed"`); // reporting should reflect confirmed
+    params.set("sort[0][field]", "start_iso");
+    params.set("sort[0][direction]", "asc");
 
-    const stylists = (data.records || []).map((r) => ({
-      id: r.id,
-      ...r.fields,
-    }));
+    const bookUrl = `/v0/${baseId()}/${encTable("Bookings")}?${params.toString()}`;
+    const bookData = await airtableFetch(bookUrl, { method: "GET" });
+    const bookings = (bookData.records || []).map((r) => ({ id: r.id, ...r.fields }));
 
-    const rows = [];
-    for (const s of stylists) {
-      const sid = s.stylist_id;
-      if (!sid) continue;
-      const util = await getUtil(date, sid);
-      rows.push({
+    const agg = new Map(); // stylist_id -> {booked_minutes, appt_count, examples:[]}
+
+    for (const b of bookings) {
+      if (!b.start_iso || !b.end_iso || !b.stylist_id) continue;
+      if (stylistFilter && b.stylist_id !== stylistFilter) continue;
+
+      // Compare by LOCAL salon date (not UTC slice)
+      if (localDate(b.start_iso) !== date) continue;
+
+      const dur = minutesBetween(b.start_iso, b.end_iso);
+      if (!agg.has(b.stylist_id)) agg.set(b.stylist_id, { booked_minutes: 0, appt_count: 0, examples: [] });
+
+      const row = agg.get(b.stylist_id);
+      row.booked_minutes += dur;
+      row.appt_count += 1;
+
+      // optional: include a couple examples with salon-local times
+      if (row.examples.length < 3) {
+        row.examples.push({
+          booking_ref: b.booking_ref,
+          service: b.service_id,
+          start_local: fmtTime.format(new Date(b.start_iso)),
+          end_local: fmtTime.format(new Date(b.end_iso)),
+        });
+      }
+    }
+
+    // 3) Overlay Redis util (fairness cache)
+    const airtable_util = [];
+    const redis_util = [];
+
+    const stylistIds = stylistFilter ? [stylistFilter] : Array.from(stylistById.keys());
+
+    for (const sid of stylistIds) {
+      const s = stylistById.get(sid) || {};
+      const a = agg.get(sid) || { booked_minutes: 0, appt_count: 0, examples: [] };
+
+      airtable_util.push({
         stylist_id: sid,
-        name: s.name,
-        booked_minutes: util.booked_minutes || 0,
-        appt_count: util.appt_count || 0,
+        name: s.name || null,
+        booked_minutes: a.booked_minutes,
+        appt_count: a.appt_count,
+        examples: a.examples,
+      });
+
+      const r = await getUtil(date, sid);
+      redis_util.push({
+        stylist_id: sid,
+        name: s.name || null,
+        booked_minutes: r.booked_minutes || 0,
+        appt_count: r.appt_count || 0,
       });
     }
 
-    rows.sort((a, b) => (a.booked_minutes - b.booked_minutes) || (a.appt_count - b.appt_count));
+    airtable_util.sort((a, b) => (a.booked_minutes - b.booked_minutes) || (a.appt_count - b.appt_count));
+    redis_util.sort((a, b) => (a.booked_minutes - b.booked_minutes) || (a.appt_count - b.appt_count));
 
-    res.json({ ok: true, date, util: rows });
+    res.json({
+      ok: true,
+      date,
+      tz,
+      airtable_util,
+      redis_util,
+      note: "airtable_util is authoritative reporting; redis_util is fairness cache.",
+    });
   } catch (e) {
     console.error("[admin/util]", e);
     res.status(500).json({ error: "admin_util_failed", message: String(e?.message || e) });
