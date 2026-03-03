@@ -1,39 +1,65 @@
+// src/calendar/googleAuth.js
 import { google } from "googleapis";
-import fs from "node:fs";
+import { redis } from "../redis.js";
 
-const TOKEN_PATH = "./.gcal-token.json";
+const TOKEN_KEY = process.env.GCAL_TOKEN_KEY || "gcal:token";
+
+function must(name) {
+  const v = process.env[name];
+  if (!v) throw new Error(`Missing ${name}`);
+  return v;
+}
 
 export function getOAuthClient() {
-  return new google.auth.OAuth2(
-    process.env.GOOGLE_CLIENT_ID,
-    process.env.GOOGLE_CLIENT_SECRET,
-    process.env.GOOGLE_REDIRECT_URI
-  );
+  const clientId = must("GOOGLE_CLIENT_ID");
+  const clientSecret = must("GOOGLE_CLIENT_SECRET");
+  const redirectUri = must("GOOGLE_REDIRECT_URI"); // must match Google Cloud redirect URIs
+
+  return new google.auth.OAuth2(clientId, clientSecret, redirectUri);
+}
+
+export async function loadToken() {
+  const raw = await redis.get(TOKEN_KEY);
+  return raw ? JSON.parse(raw) : null;
+}
+
+export async function saveToken(token) {
+  if (!token) throw new Error("saveToken called with empty token");
+  await redis.set(TOKEN_KEY, JSON.stringify(token));
+  return true;
+}
+
+export async function getAuthorizedClient() {
+  const oAuth2Client = getOAuthClient();
+  const token = await loadToken();
+  if (!token) return null;
+  oAuth2Client.setCredentials(token);
+  return oAuth2Client;
 }
 
 export function getAuthUrl() {
   const oAuth2Client = getOAuthClient();
+
+  // keep scopes minimal for your use case
+  const scopes = ["https://www.googleapis.com/auth/calendar"];
+
   return oAuth2Client.generateAuthUrl({
     access_type: "offline",
-    prompt: "consent",
-    scope: ["https://www.googleapis.com/auth/calendar"],
+    prompt: "consent", // ensures refresh_token is issued (important!)
+    scope: scopes,
   });
 }
 
-export function saveToken(token) {
-  fs.writeFileSync(TOKEN_PATH, JSON.stringify(token, null, 2));
-}
-
-export function loadToken() {
-  if (!fs.existsSync(TOKEN_PATH)) return null;
-  return JSON.parse(fs.readFileSync(TOKEN_PATH, "utf8"));
-}
-
-export function getAuthedClientOrNull() {
-  const token = loadToken();
-  if (!token) return null;
-
+/**
+ * Exchange code -> token and store in Redis
+ */
+export async function handleOAuthCallback(code) {
   const oAuth2Client = getOAuthClient();
-  oAuth2Client.setCredentials(token);
-  return oAuth2Client;
+  const { tokens } = await oAuth2Client.getToken(code);
+
+  // tokens should include refresh_token on first consent
+  await saveToken(tokens);
+
+  oAuth2Client.setCredentials(tokens);
+  return tokens;
 }
