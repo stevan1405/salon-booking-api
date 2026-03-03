@@ -8,9 +8,12 @@ import { phase3PickAlt } from "./phase3PickAlt.js";
 import { phase3Cancel } from "./phase3Cancel.js";
 import { phase3CancelByRef } from "./phase3CancelByRef.js";
 import { phase3RescheduleByRef } from "./phase3RescheduleByRef.js";
+import { adminRouter } from "./admin.js";
 
 const app = express();   // 🔥 THIS WAS MISSING
 app.use(express.json());
+
+app.use("/admin", adminRouter);
 
 // Health route
 app.get("/health", (req, res) => {
