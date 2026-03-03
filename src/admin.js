@@ -57,10 +57,19 @@ adminRouter.get("/bookings", async (req, res) => {
     const url = `/v0/${baseId()}/${encTable("Bookings")}?${params.toString()}`;
     const data = await airtableFetch(url, { method: "GET" });
 
-    const bookings = (data.records || []).map((r) => ({
-      id: r.id,
-      ...r.fields,
-    }));
+    const bookings = (data.records || []).map((r) => {
+        const f = r.fields || {};
+        return {
+            id: r.id,
+            ...f,
+
+            // salon-local display fields (Google Calendar style)
+            start_local_date: localDate(f.start_iso),
+            start_local_time: localTime(f.start_iso),
+            end_local_time: localTime(f.end_iso),
+            tz,
+        };
+        });
 
     res.json({
       ok: true,
@@ -73,6 +82,25 @@ adminRouter.get("/bookings", async (req, res) => {
     res.status(500).json({ error: "admin_list_failed", message: String(e?.message || e) });
   }
 });
+
+const tz = process.env.SALON_TZ || "Africa/Harare";
+
+const fmtDate = new Intl.DateTimeFormat("en-CA", {
+  timeZone: tz,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+
+const fmtTime = new Intl.DateTimeFormat("en-GB", {
+  timeZone: tz,
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+
+const localDate = (iso) => (iso ? fmtDate.format(new Date(iso)) : null);
+const localTime = (iso) => (iso ? fmtTime.format(new Date(iso)) : null);
 
 // --- 2) lookup booking by booking_ref ---
 adminRouter.get("/booking/:booking_ref", async (req, res) => {
