@@ -49,13 +49,26 @@ export async function createHoldEvent(calendarId, { startISO, endISO, timeZone, 
 }
 
 // --- Confirm event (patch tentative -> confirmed) ---
-export async function confirmEvent(calendarId, eventId) {
+export async function confirmEvent(calendarId, eventId, patch = {}) {
   const cal = await calendarClient();
+
+  const body = {
+    status: "confirmed",
+    ...patch,
+  };
+
+  // If caller provides privateProps, place it correctly
+  if (patch.privateProps) {
+    body.extendedProperties = {
+      private: patch.privateProps,
+    };
+    delete body.privateProps;
+  }
 
   const resp = await cal.events.patch({
     calendarId,
     eventId,
-    requestBody: { status: "confirmed" },
+    requestBody: body,
   });
 
   return resp.data;

@@ -45,8 +45,28 @@ export async function phase3Confirm({ from }) {
     return { draft, reply: "That hold expired. Please share a new time you'd like." };
   }
 
-  // Confirm Google event
-  await confirmEvent(draft.calendar_id, draft.hold_event_id);
+  // Build the same summary/props on confirm (so calendar entry stays consistent)
+  const stylistName = draft.stylist_name || ""; // if you stored it; otherwise leave ""
+  const summary =
+    `${draft.service} — ${draft.first_name || "Guest"}` +
+    (stylistName ? ` — ${stylistName}` : "") +
+    (draft.stylist_id ? ` (${draft.stylist_id})` : "");
+
+  const privateProps = {
+    source: "salon-bot",
+    booking_ref: draft.booking_ref,
+    stylist_id: draft.stylist_id || "",
+    stylist_name: stylistName || "",
+    service: draft.service || "",
+    wa_from: draft.from || "",
+  };
+
+  // Confirm + update event details in one call
+  await confirmEvent(draft.calendar_id, draft.hold_event_id, { summary, privateProps });
+
+  // mark booked
+  draft.booking_status = "booked";
+  draft.event_id = draft.hold_event_id;
 
   const duration = draft.duration_min || 60;
 

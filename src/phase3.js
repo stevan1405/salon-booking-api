@@ -359,30 +359,54 @@ export async function phase3Handle({ from, extracted }) {
   const chosen = pickFairStylistForSlot(withUtil);
 
   draft.stylist_id = chosen.stylist_id;
+  draft.stylist_name = chosenStylist?.name || null;
   draft.calendar_id = chosen.calendar_id;
 
   // Create 5-minute hold
   const booking_ref = draft.booking_ref || makeBookingRef();
   draft.booking_ref = booking_ref;
+  
+  // --- Build human-visible summary (shows in Google Calendar list) ---
+  const stylistId = draft.stylist_id;                // e.g. "sty_01"
+  const stylistName = chosenStylist?.name || "";     // e.g. "Maria" (use your actual variable name)
 
-  const summary = `${draft.service} – ${draft.first_name} (${dur}m)`;
-  const description = `Booked via WhatsApp\nRef: ${booking_ref}`;
+  // Example output: "Braids — Tatenda — Maria (sty_01)"
+  const summary =
+    `${draft.service} — ${draft.first_name || "Guest"}` +
+    (stylistName ? ` — ${stylistName}` : "") +
+    (stylistId ? ` (${stylistId})` : "");
 
-  const hold = await createHoldEvent(chosen.calendar_id, {
+  // --- Machine-readable metadata (for wipes/admin/tools) ---
+  const privateProps = {
+    source: "salon-bot",
+    booking_ref: draft.booking_ref,
+    stylist_id: stylistId || "",
+    stylist_name: stylistName || "",
+    service: draft.service || "",
+    wa_from: draft.from || "",
+  };
+
+  // Keep your existing description (or use this pattern)
+  const description =
+    `Booked via WhatsApp\n` +
+    `booking_ref=${draft.booking_ref}\n` +
+    `stylist_id=${stylistId || ""}\n` +
+    `service=${draft.service || ""}\n` +
+    `source=salon-bot\n` +
+    `from=${draft.from || ""}`;
+
+  // Create hold event (tentative)
+  const ev = await createHoldEvent(draft.calendar_id, {
     startISO,
     endISO,
     timeZone: draft.tz,
     summary,
     description,
-    privateProps: {
-      booking_ref,
-      wa_from: from,
-      stylist_id: chosen.stylist_id,
-      source: "whatsapp",
-    },
+    privateProps,
   });
 
-  draft.hold_event_id = hold.id;
+  // Save hold details
+  draft.hold_event_id = ev.id;
   draft.hold_expires_at = Date.now() + 5 * 60 * 1000;
   draft.booking_status = "awaiting_confirm";
   draft.hold_idempotency_key = draft.idempotency_key;
