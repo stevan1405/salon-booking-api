@@ -29,8 +29,46 @@ function encTable(name) {
 }
 
 function encodeFormula(s) {
-  // safest to rely on URLSearchParams in the request below, but keeping helper
   return s;
+}
+
+// --- timezone formatting (for admin display) ---
+const SALON_TZ = process.env.SALON_TZ || "Africa/Harare";
+
+const fmtDate = new Intl.DateTimeFormat("en-CA", {
+  timeZone: SALON_TZ,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+
+const fmtTime = new Intl.DateTimeFormat("en-GB", {
+  timeZone: SALON_TZ,
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+
+const localDate = (iso) => (iso ? fmtDate.format(new Date(iso)) : null);
+const localTime = (iso) => (iso ? fmtTime.format(new Date(iso)) : null);
+
+// Convert a salon-local YYYY-MM-DD to a UTC [start,end) ISO window.
+// For Africa/Harare (UTC+2, no DST), local midnight = 22:00Z previous day.
+function dayRangeUtc(dateYYYYMMDD, tz = SALON_TZ) {
+  const [y, m, d] = String(dateYYYYMMDD).split("-").map(Number);
+  if (!y || !m || !d) throw new Error("Invalid date (expected YYYY-MM-DD)");
+
+  // If you later support DST timezones, switch to luxon.
+  if (tz === "Africa/Harare") {
+    const start = new Date(Date.UTC(y, m - 1, d, -2, 0, 0)); // local 00:00 -> UTC-2h
+    const end = new Date(Date.UTC(y, m - 1, d + 1, -2, 0, 0));
+    return { startIso: start.toISOString(), endIso: end.toISOString() };
+  }
+
+  // Fallback: treat as UTC day
+  const start = new Date(Date.UTC(y, m - 1, d, 0, 0, 0));
+  const end = new Date(Date.UTC(y, m - 1, d + 1, 0, 0, 0));
+  return { startIso: start.toISOString(), endIso: end.toISOString() };
 }
 
 // --- 1) list bookings (by date, optional status) ---
@@ -38,19 +76,25 @@ adminRouter.get("/bookings", async (req, res) => {
   try {
     const { date, status, limit, offset } = req.query;
 
-    // If date is provided, filter by date portion of start_iso (ISO string)
-    // Example formula: LEFT({start_iso},10)='2026-03-03'
+    // Airtable DateTime filtering: use a UTC window derived from salon-local day.
     const parts = [];
-    if (date) parts.push(`LEFT({start_iso},10)="${date}"`);
-    if (status) parts.push(`{status}="${status}"`);
 
-    const filterByFormula = parts.length ? `AND(${parts.join(",")})` : null;
+    if (date) {
+      const { startIso, endIso } = dayRangeUtc(String(date), SALON_TZ);
+      parts.push(`AND(IS_AFTER({start_iso},"${startIso}"),IS_BEFORE({start_iso},"${endIso}"))`);
+    }
+
+    if (status) {
+      parts.push(`{status}="${status}"`);
+    }
+
+    const filterByFormula =
+      parts.length === 0 ? null : parts.length === 1 ? parts[0] : `AND(${parts.join(",")})`;
 
     const params = new URLSearchParams();
     if (filterByFormula) params.set("filterByFormula", encodeFormula(filterByFormula));
     params.set("pageSize", String(Math.min(Number(limit || 50), 100)));
     if (offset) params.set("offset", String(offset));
-    // Sort newest first
     params.set("sort[0][field]", "start_iso");
     params.set("sort[0][direction]", "asc");
 
@@ -58,18 +102,18 @@ adminRouter.get("/bookings", async (req, res) => {
     const data = await airtableFetch(url, { method: "GET" });
 
     const bookings = (data.records || []).map((r) => {
-        const f = r.fields || {};
-        return {
-            id: r.id,
-            ...f,
+      const f = r.fields || {};
+      return {
+        id: r.id,
+        ...f,
 
-            // salon-local display fields (Google Calendar style)
-            start_local_date: localDate(f.start_iso),
-            start_local_time: localTime(f.start_iso),
-            end_local_time: localTime(f.end_iso),
-            tz,
-        };
-        });
+        // salon-local display fields (Google Calendar style)
+        start_local_date: localDate(f.start_iso),
+        start_local_time: localTime(f.start_iso),
+        end_local_time: localTime(f.end_iso),
+        tz: SALON_TZ,
+      };
+    });
 
     res.json({
       ok: true,
@@ -82,25 +126,6 @@ adminRouter.get("/bookings", async (req, res) => {
     res.status(500).json({ error: "admin_list_failed", message: String(e?.message || e) });
   }
 });
-
-const tz = process.env.SALON_TZ || "Africa/Harare";
-
-const fmtDate = new Intl.DateTimeFormat("en-CA", {
-  timeZone: tz,
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit",
-});
-
-const fmtTime = new Intl.DateTimeFormat("en-GB", {
-  timeZone: tz,
-  hour: "2-digit",
-  minute: "2-digit",
-  hour12: false,
-});
-
-const localDate = (iso) => (iso ? fmtDate.format(new Date(iso)) : null);
-const localTime = (iso) => (iso ? fmtTime.format(new Date(iso)) : null);
 
 // --- 2) lookup booking by booking_ref ---
 adminRouter.get("/booking/:booking_ref", async (req, res) => {
@@ -118,7 +143,18 @@ adminRouter.get("/booking/:booking_ref", async (req, res) => {
     const rec = (data.records || [])[0];
     if (!rec) return res.status(404).json({ error: "not_found" });
 
-    res.json({ ok: true, booking: { id: rec.id, ...rec.fields } });
+    const f = rec.fields || {};
+    res.json({
+      ok: true,
+      booking: {
+        id: rec.id,
+        ...f,
+        start_local_date: localDate(f.start_iso),
+        start_local_time: localTime(f.start_iso),
+        end_local_time: localTime(f.end_iso),
+        tz: SALON_TZ,
+      },
+    });
   } catch (e) {
     console.error("[admin/booking/:ref]", e);
     res.status(500).json({ error: "admin_lookup_failed", message: String(e?.message || e) });
@@ -126,31 +162,30 @@ adminRouter.get("/booking/:booking_ref", async (req, res) => {
 });
 
 // --- 3) util snapshot (Redis fairness counters) for a date ---
-// requires you already store util:YYYY-MM-DD:sty_xx as JSON
+// returns both Airtable-based totals (authoritative) and Redis util (fairness cache)
 adminRouter.get("/util", async (req, res) => {
   try {
     const date = String(req.query.date || "");
     const stylistFilter = req.query.stylist_id ? String(req.query.stylist_id) : null;
     if (!date) return res.status(400).json({ error: "missing_date" });
 
-    const tz = process.env.SALON_TZ || "Africa/Harare";
+    const tz = SALON_TZ;
 
-    // Helpers to format + compute in salon TZ
-    const fmtDate = new Intl.DateTimeFormat("en-CA", {
+    const fmtDateLocal = new Intl.DateTimeFormat("en-CA", {
       timeZone: tz,
       year: "numeric",
       month: "2-digit",
       day: "2-digit",
     });
 
-    const fmtTime = new Intl.DateTimeFormat("en-GB", {
+    const fmtTimeLocal = new Intl.DateTimeFormat("en-GB", {
       timeZone: tz,
       hour: "2-digit",
       minute: "2-digit",
       hour12: false,
     });
 
-    const localDate = (iso) => fmtDate.format(new Date(iso)); // YYYY-MM-DD
+    const localDateOnly = (iso) => fmtDateLocal.format(new Date(iso)); // YYYY-MM-DD
     const minutesBetween = (a, b) => Math.round((new Date(b) - new Date(a)) / 60000);
 
     // 1) Load stylists (for names)
@@ -163,11 +198,10 @@ adminRouter.get("/util", async (req, res) => {
       if (s.stylist_id) stylistById.set(s.stylist_id, s);
     }
 
-    // 2) Load bookings (confirmed only) and aggregate by stylist for the requested LOCAL date
-    // We'll fetch a broad set and then filter locally by timezone date.
+    // 2) Load confirmed bookings and aggregate by LOCAL date
     const params = new URLSearchParams();
     params.set("pageSize", "100");
-    params.set("filterByFormula", `{status}="confirmed"`); // reporting should reflect confirmed
+    params.set("filterByFormula", `{status}="confirmed"`);
     params.set("sort[0][field]", "start_iso");
     params.set("sort[0][direction]", "asc");
 
@@ -175,14 +209,13 @@ adminRouter.get("/util", async (req, res) => {
     const bookData = await airtableFetch(bookUrl, { method: "GET" });
     const bookings = (bookData.records || []).map((r) => ({ id: r.id, ...r.fields }));
 
-    const agg = new Map(); // stylist_id -> {booked_minutes, appt_count, examples:[]}
+    const agg = new Map();
 
     for (const b of bookings) {
       if (!b.start_iso || !b.end_iso || !b.stylist_id) continue;
       if (stylistFilter && b.stylist_id !== stylistFilter) continue;
 
-      // Compare by LOCAL salon date (not UTC slice)
-      if (localDate(b.start_iso) !== date) continue;
+      if (localDateOnly(b.start_iso) !== date) continue;
 
       const dur = minutesBetween(b.start_iso, b.end_iso);
       if (!agg.has(b.stylist_id)) agg.set(b.stylist_id, { booked_minutes: 0, appt_count: 0, examples: [] });
@@ -191,13 +224,12 @@ adminRouter.get("/util", async (req, res) => {
       row.booked_minutes += dur;
       row.appt_count += 1;
 
-      // optional: include a couple examples with salon-local times
       if (row.examples.length < 3) {
         row.examples.push({
           booking_ref: b.booking_ref,
           service: b.service_id,
-          start_local: fmtTime.format(new Date(b.start_iso)),
-          end_local: fmtTime.format(new Date(b.end_iso)),
+          start_local: fmtTimeLocal.format(new Date(b.start_iso)),
+          end_local: fmtTimeLocal.format(new Date(b.end_iso)),
         });
       }
     }
