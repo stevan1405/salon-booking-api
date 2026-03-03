@@ -1,6 +1,7 @@
 // src/calendar/googleAuth.js
 import { google } from "googleapis";
-import { redis } from "../redis.js";
+//import { redis } from "../redis.js";
+import { getRedis } from "../redis.js";
 
 const TOKEN_KEY = process.env.GCAL_TOKEN_KEY || "gcal:token";
 
@@ -19,13 +20,16 @@ export function getOAuthClient() {
 }
 
 export async function loadToken() {
-  const raw = await redis.get(TOKEN_KEY);
+  const r = getRedis();
+  if (!r) return null;
+  const raw = await r.get(TOKEN_KEY);
   return raw ? JSON.parse(raw) : null;
 }
 
 export async function saveToken(token) {
-  if (!token) throw new Error("saveToken called with empty token");
-  await redis.set(TOKEN_KEY, JSON.stringify(token));
+  const r = getRedis();
+  if (!r) throw new Error("Redis not configured (missing REDIS_URL)");
+  await r.set(TOKEN_KEY, JSON.stringify(token));
   return true;
 }
 
