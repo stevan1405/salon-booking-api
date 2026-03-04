@@ -350,74 +350,82 @@ export async function phase3Handle({ from, extracted }) {
     };
   }
   // -------------------------------------------------------------------------------
-
   // Fairness selection for requested slot
-  const withUtil = await Promise.all(
-    free.map(async (s) => ({ s, util: await getUtil(draft.date, s.stylist_id) }))
-  );
+const withUtil = await Promise.all(
+  free.map(async (s) => ({ s, util: await getUtil(draft.date, s.stylist_id) }))
+);
 
-  const chosen = pickFairStylistForSlot(withUtil);
+const picked = pickFairStylistForSlot(withUtil);
 
-  draft.stylist_id = chosen.stylist_id;
-  draft.stylist_name = chosenStylist?.name || null;
-  draft.calendar_id = chosen.calendar_id;
+// Support either return shape:
+//  - stylist object directly
+//  - OR { s, util }
+const chosen = picked?.s ? picked.s : picked;
 
-  // Create 5-minute hold
-  const booking_ref = draft.booking_ref || makeBookingRef();
-  draft.booking_ref = booking_ref;
-  
-  // --- Build human-visible summary (shows in Google Calendar list) ---
-  const stylistId = draft.stylist_id;                // e.g. "sty_01"
-  const stylistName = chosenStylist?.name || "";     // e.g. "Maria" (use your actual variable name)
+if (!chosen?.stylist_id || !chosen?.calendar_id) {
+  throw new Error("No eligible stylist chosen (missing stylist_id or calendar_id)");
+}
 
-  // Example output: "Braids — Tatenda — Maria (sty_01)"
-  const summary =
-    `${draft.service} — ${draft.first_name || "Guest"}` +
-    (stylistName ? ` — ${stylistName}` : "") +
-    (stylistId ? ` (${stylistId})` : "");
+draft.stylist_id = chosen.stylist_id;
+draft.stylist_name = chosen.name || null;
+draft.calendar_id = chosen.calendar_id;
 
-  // --- Machine-readable metadata (for wipes/admin/tools) ---
-  const privateProps = {
-    source: "salon-bot",
-    booking_ref: draft.booking_ref,
-    stylist_id: stylistId || "",
-    stylist_name: stylistName || "",
-    service: draft.service || "",
-    wa_from: draft.from || "",
-  };
+// Create 5-minute hold
+const booking_ref = draft.booking_ref || makeBookingRef();
+draft.booking_ref = booking_ref;
 
-  // Keep your existing description (or use this pattern)
-  const description =
-    `Booked via WhatsApp\n` +
-    `booking_ref=${draft.booking_ref}\n` +
-    `stylist_id=${stylistId || ""}\n` +
-    `service=${draft.service || ""}\n` +
-    `source=salon-bot\n` +
-    `from=${draft.from || ""}`;
+// --- Build human-visible summary (shows in Google Calendar list) ---
+const stylistId = draft.stylist_id;          // e.g. "sty_01"
+const stylistName = draft.stylist_name || ""; // e.g. "Maria"
 
-  // Create hold event (tentative)
-  const ev = await createHoldEvent(draft.calendar_id, {
-    startISO,
-    endISO,
-    timeZone: draft.tz,
-    summary,
-    description,
-    privateProps,
-  });
+// Example output: "Braids — Tatenda — Maria (sty_01)"
+const summary =
+  `${draft.service} — ${draft.first_name || "Guest"}` +
+  (stylistName ? ` — ${stylistName}` : "") +
+  (stylistId ? ` (${stylistId})` : "");
 
-  // Save hold details
-  draft.hold_event_id = ev.id;
-  draft.hold_expires_at = Date.now() + 5 * 60 * 1000;
-  draft.booking_status = "awaiting_confirm";
-  draft.hold_idempotency_key = draft.idempotency_key;
+// --- Machine-readable metadata (for wipes/admin/tools) ---
+const privateProps = {
+  source: "salon-bot",
+  booking_ref: draft.booking_ref,
+  stylist_id: stylistId || "",
+  stylist_name: stylistName || "",
+  service: draft.service || "",
+  wa_from: draft.from || "",
+};
 
-  // Clear any old alt options once we have a hold
-  draft.alt_options = null;
+// Human-friendly + machine-friendly description
+const description =
+  `Booked via WhatsApp\n` +
+  `Ref: ${draft.booking_ref}\n\n` +
+  `stylist_id=${stylistId || ""}\n` +
+  `service=${draft.service || ""}\n` +
+  `source=salon-bot\n` +
+  `from=${draft.from || ""}`;
 
-  await saveDraft(from, draft);
+// Create hold event (tentative)
+const ev = await createHoldEvent(draft.calendar_id, {
+  startISO,
+  endISO,
+  timeZone: draft.tz,
+  summary,
+  description,
+  privateProps,
+});
 
-  return {
-    draft,
-    reply: `I can hold **${draft.service}** on **${draft.date} ${draft.time}** with **${chosen.name}** for 5 minutes. Reply **CONFIRM** to book or **CHANGE** for other times.`,
-  };
+// Save hold details
+draft.hold_event_id = ev.id;
+draft.hold_expires_at = Date.now() + 5 * 60 * 1000;
+draft.booking_status = "awaiting_confirm";
+draft.hold_idempotency_key = draft.idempotency_key;
+
+// Clear any old alt options once we have a hold
+draft.alt_options = null;
+
+await saveDraft(from, draft);
+
+return {
+  draft,
+  reply: `I can hold **${draft.service}** on **${draft.date} ${draft.time}** with **${draft.stylist_name || chosen.name || "a stylist"}** for 5 minutes. Reply **CONFIRM** to book or **CHANGE** for other times.`,
+};
 }
