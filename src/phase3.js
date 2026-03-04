@@ -1,20 +1,14 @@
 // src/phase3.js
 import crypto from "node:crypto";
+import { DateTime } from "luxon";
+
 import { getActiveStylists, getServiceDurationMin } from "./airtable/read.js";
 import { loadDraft, saveDraft, getUtil } from "./redis.js";
 import { isWithinWorkingHours } from "./calendar/workingHours.js";
 import { freeBusy, createHoldEvent } from "./calendar/googleCalendar.js";
 
-function addMinutes(date, min) {
-  return new Date(date.getTime() + min * 60000);
-}
-
 function fmt2(n) {
   return String(n).padStart(2, "0");
-}
-
-function toHHmm(date) {
-  return `${fmt2(date.getHours())}:${fmt2(date.getMinutes())}`;
 }
 
 function makeBookingRef() {
@@ -27,10 +21,24 @@ function idempotencyKey({ from, service, date, time }) {
   return crypto.createHash("sha256").update(raw).digest("hex").slice(0, 24);
 }
 
-// Parse "YYYY-MM-DD" + "HH:mm" into a Date.
-// NOTE: For MVP we keep this consistent with your existing behavior.
-function makeLocalDate(dateYYYYMMDD, timeHHmm) {
-  return new Date(`${dateYYYYMMDD}T${timeHHmm}:00`);
+// --- Luxon helpers (timezone-correct) ---
+function makeLocalDT(dateYYYYMMDD, timeHHmm, tz) {
+  const zone = tz || "Africa/Harare";
+  const dt = DateTime.fromISO(`${dateYYYYMMDD}T${timeHHmm}`, { zone });
+  if (!dt.isValid) throw new Error(`Invalid local datetime: ${dateYYYYMMDD} ${timeHHmm} (${zone})`);
+  return dt;
+}
+
+function addMinutesDT(dt, min) {
+  return dt.plus({ minutes: Number(min || 0) });
+}
+
+function toHHmmDT(dt) {
+  return dt.toFormat("HH:mm");
+}
+
+function toUtcISO(dt) {
+  return dt.toUTC().toISO(); // includes Z
 }
 
 function pickFairStylistForSlot(freeStylistsWithUtil) {
@@ -66,30 +74,31 @@ async function findNextTeamOptions({
   maxSteps = 24, // 24 * 30min = 12 hours lookahead
 }) {
   const results = [];
+  const usedStylists = new Set();
 
-  let cursor = makeLocalDate(dateYYYYMMDD, startTimeHHmm);
+  let cursor = makeLocalDT(dateYYYYMMDD, startTimeHHmm, tz);
 
   for (let i = 0; i < maxSteps && results.length < optionsCount; i++) {
     // move forward by step (skip i=0 if you already tried requested time)
-    cursor = addMinutes(cursor, stepMin);
+    cursor = addMinutesDT(cursor, stepMin);
 
     const slotStart = cursor;
-    const slotEnd = addMinutes(slotStart, durationMin);
+    const slotEnd = addMinutesDT(slotStart, durationMin);
 
-    const slotStartHHmm = toHHmm(slotStart);
-    const slotEndHHmm = toHHmm(slotEnd);
+    const slotStartHHmm = toHHmmDT(slotStart);
+    const slotEndHHmm = toHHmmDT(slotEnd);
 
-    // filter by working hours for this slot
+    // filter by working hours for this slot (HH:mm in salon tz)
     const eligible = stylists.filter((s) =>
       isWithinWorkingHours(s.working_hours_json, dateYYYYMMDD, slotStartHHmm, slotEndHHmm)
     );
     if (!eligible.length) continue;
 
-    // FreeBusy check for this slot across eligible calendars
+    // FreeBusy check: send UTC ISO instants
     const fb = await freeBusy(
       eligible.map((s) => s.calendar_id),
-      slotStart.toISOString(),
-      slotEnd.toISOString(),
+      toUtcISO(slotStart),
+      toUtcISO(slotEnd),
       tz
     );
 
@@ -106,14 +115,33 @@ async function findNextTeamOptions({
       free.map(async (s) => ({ s, util: await getUtil(dateYYYYMMDD, s.stylist_id) }))
     );
 
-    const chosen = pickFairStylistForSlot(withUtil);
-    if (!chosen) continue;
+    // Sort by fairness (same logic as pickFairStylistForSlot but we want "avoid repeats" too)
+    withUtil.sort((a, b) => {
+      const am = a.util.booked_minutes || 0;
+      const bm = b.util.booked_minutes || 0;
+      if (am !== bm) return am - bm;
+
+      const ac = a.util.appt_count || 0;
+      const bc = b.util.appt_count || 0;
+      if (ac !== bc) return ac - bc;
+
+      return String(a.s.stylist_id || "").localeCompare(String(b.s.stylist_id || ""));
+    });
+
+    // Prefer a stylist not already used in options
+    const chosenObj =
+      withUtil.find((x) => !usedStylists.has(x.s.stylist_id)) ||
+      withUtil[0];
+
+    if (!chosenObj) continue;
+
+    usedStylists.add(chosenObj.s.stylist_id);
 
     results.push({
       time: slotStartHHmm,
-      stylist_id: chosen.stylist_id,
-      stylist_name: chosen.name,
-      calendar_id: chosen.calendar_id,
+      stylist_id: chosenObj.s.stylist_id,
+      stylist_name: chosenObj.s.name,
+      calendar_id: chosenObj.s.calendar_id,
     });
   }
 
@@ -121,16 +149,17 @@ async function findNextTeamOptions({
 }
 
 export async function phase3Handle({ from, extracted }) {
-  const draft = await loadDraft(from);
+  // loadDraft might return null/undefined depending on your implementation
+  const draft = (await loadDraft(from)) || {};
 
   // Merge fields
   draft.from = from;
-  draft.service = extracted.service ?? draft.service;
-  draft.date = extracted.date ?? draft.date; // YYYY-MM-DD
-  draft.time = extracted.time ?? draft.time; // HH:mm
-  draft.first_name = extracted.first_name ?? draft.first_name;
-  draft.stylist_name = extracted.stylist_name ?? draft.stylist_name; // optional
-  draft.tz = draft.tz || "Africa/Harare";
+  draft.service = extracted?.service ?? draft.service;
+  draft.date = extracted?.date ?? draft.date; // YYYY-MM-DD
+  draft.time = extracted?.time ?? draft.time; // HH:mm
+  draft.first_name = extracted?.first_name ?? draft.first_name;
+  draft.stylist_name = extracted?.stylist_name ?? draft.stylist_name; // optional
+  draft.tz = extracted?.tz ?? draft.tz ?? "Africa/Harare";
 
   // Missing-field handling
   for (const f of ["service", "date", "time", "first_name"]) {
@@ -176,12 +205,13 @@ export async function phase3Handle({ from, extracted }) {
     };
   }
 
-  // Requested window
-  const start = makeLocalDate(draft.date, draft.time);
-  const end = addMinutes(start, dur);
+  // Requested window (interpret as LOCAL time in draft.tz)
+  const startLocal = makeLocalDT(draft.date, draft.time, draft.tz);
+  const endLocal = addMinutesDT(startLocal, dur);
 
-  const startISO = start.toISOString();
-  const endISO = end.toISOString();
+  // Convert to UTC instants for Google/Airtable
+  const startISO = toUtcISO(startLocal);
+  const endISO = toUtcISO(endLocal);
 
   // Load stylists
   const stylists = await getActiveStylists();
@@ -204,9 +234,9 @@ export async function phase3Handle({ from, extracted }) {
     draft.stylist_pref = { type: "any" };
   }
 
-  // Working-hours filter for the requested slot
-  const startHHmm = toHHmm(start);
-  const endHHmm = toHHmm(end);
+  // Working-hours filter for the requested slot (HH:mm in local tz)
+  const startHHmm = toHHmmDT(startLocal);
+  const endHHmm = toHHmmDT(endLocal);
 
   const eligible = preferredStylists.filter((s) =>
     isWithinWorkingHours(s.working_hours_json, draft.date, startHHmm, endHHmm)
@@ -217,7 +247,7 @@ export async function phase3Handle({ from, extracted }) {
     return { draft, reply: `No stylists are working at ${draft.time}. Try another time?` };
   }
 
-  // FreeBusy check for requested slot
+  // FreeBusy check for requested slot (UTC instants)
   const fb = await freeBusy(
     eligible.map((s) => s.calendar_id),
     startISO,
@@ -231,7 +261,7 @@ export async function phase3Handle({ from, extracted }) {
     return busy.length === 0;
   });
 
-  // ---- NEW: offer alternatives (30 min increments, 3 options) when no one is free ----
+  // ---- offer alternatives (30 min increments, 3 options) when no one is free ----
   if (!free.length) {
     // If specific stylist preference, keep current message (we can add specific alternatives next)
     if (pref === "specific") {
@@ -243,90 +273,21 @@ export async function phase3Handle({ from, extracted }) {
     }
 
     // Team alternatives (any stylist)
-    async function findNextTeamOptions({
-      stylists,
-      dateYYYYMMDD,
-      startTimeHHmm,
-      durationMin,
-      tz,
-      optionsCount = 3,
-      stepMin = 30,
-      maxSteps = 24,
-    }) {
-      const results = [];
-      const usedStylists = new Set();
-
-      let cursor = makeLocalDate(dateYYYYMMDD, startTimeHHmm);
-
-      for (let i = 0; i < maxSteps && results.length < optionsCount; i++) {
-        cursor = addMinutes(cursor, stepMin);
-
-        const slotStart = cursor;
-        const slotEnd = addMinutes(slotStart, durationMin);
-
-        const slotStartHHmm = toHHmm(slotStart);
-        const slotEndHHmm = toHHmm(slotEnd);
-
-        const eligible = stylists.filter((s) =>
-          isWithinWorkingHours(s.working_hours_json, dateYYYYMMDD, slotStartHHmm, slotEndHHmm)
-        );
-        if (!eligible.length) continue;
-
-        const fb = await freeBusy(
-          eligible.map((s) => s.calendar_id),
-          slotStart.toISOString(),
-          slotEnd.toISOString(),
-          tz
-        );
-
-        const free = eligible.filter((s) => {
-          const cal = fb[s.calendar_id];
-          const busy = cal?.busy || [];
-          return busy.length === 0;
-        });
-
-        if (!free.length) continue;
-
-        const withUtil = await Promise.all(
-          free.map(async (s) => ({ s, util: await getUtil(dateYYYYMMDD, s.stylist_id) }))
-        );
-
-        // Sort by fairness
-        withUtil.sort((a, b) => {
-          const am = a.util.booked_minutes || 0;
-          const bm = b.util.booked_minutes || 0;
-          if (am !== bm) return am - bm;
-
-          const ac = a.util.appt_count || 0;
-          const bc = b.util.appt_count || 0;
-          if (ac !== bc) return ac - bc;
-
-          return String(a.s.stylist_id).localeCompare(String(b.s.stylist_id));
-        });
-
-        // Prefer a stylist not already used in options
-        let chosenObj =
-          withUtil.find((x) => !usedStylists.has(x.s.stylist_id)) ||
-          withUtil[0]; // fallback if all used
-
-          if (!chosenObj) continue;
-
-        usedStylists.add(chosenObj.s.stylist_id);
-
-        results.push({
-          time: slotStartHHmm,
-          stylist_id: chosenObj.s.stylist_id,
-          stylist_name: chosenObj.s.name,
-          calendar_id: chosenObj.s.calendar_id,
-        });
-      }
-
-      return results;
-    }
-
-    await saveDraft(from, draft);
+    const options = await findNextTeamOptions({
+      stylists: eligible,            // eligible team for that day/working-hours baseline
+      dateYYYYMMDD: draft.date,
+      startTimeHHmm: draft.time,
+      durationMin: dur,
+      tz: draft.tz,
+      optionsCount: 3,
+      stepMin: 30,
+      maxSteps: 24,
+    });
 
     if (!options.length) {
+      draft.alt_options = null;
+      draft.booking_status = "draft";
+      await saveDraft(from, draft);
       return {
         draft,
         reply: `No stylists are free at **${draft.time}** for **${draft.service}** (${dur}m). Reply CHANGE to try a different time.`,
@@ -337,9 +298,13 @@ export async function phase3Handle({ from, extracted }) {
       .map((o, idx) => `${idx + 1}) ${o.time} with ${o.stylist_name}`)
       .join("\n");
 
-    // Store the options in draft so n8n/reducer can handle "1/2/3" selection next
+    // Store the options in draft so reducer can handle "1/2/3" selection next
     draft.alt_options = options; // [{time, stylist_id, stylist_name, calendar_id}]
     draft.booking_status = "offering_alts";
+    draft.hold_event_id = null;
+    draft.hold_expires_at = null;
+    draft.hold_idempotency_key = null;
+
     await saveDraft(from, draft);
 
     return {
@@ -350,82 +315,76 @@ export async function phase3Handle({ from, extracted }) {
     };
   }
   // -------------------------------------------------------------------------------
+
   // Fairness selection for requested slot
-const withUtil = await Promise.all(
-  free.map(async (s) => ({ s, util: await getUtil(draft.date, s.stylist_id) }))
-);
+  const withUtil = await Promise.all(
+    free.map(async (s) => ({ s, util: await getUtil(draft.date, s.stylist_id) }))
+  );
 
-const picked = pickFairStylistForSlot(withUtil);
+  const chosen = pickFairStylistForSlot(withUtil);
 
-// Support either return shape:
-//  - stylist object directly
-//  - OR { s, util }
-const chosen = picked?.s ? picked.s : picked;
+  if (!chosen?.stylist_id || !chosen?.calendar_id) {
+    throw new Error("No eligible stylist chosen (missing stylist_id or calendar_id)");
+  }
 
-if (!chosen?.stylist_id || !chosen?.calendar_id) {
-  throw new Error("No eligible stylist chosen (missing stylist_id or calendar_id)");
-}
+  draft.stylist_id = chosen.stylist_id;
+  draft.stylist_name = chosen.name || null;
+  draft.calendar_id = chosen.calendar_id;
 
-draft.stylist_id = chosen.stylist_id;
-draft.stylist_name = chosen.name || null;
-draft.calendar_id = chosen.calendar_id;
+  // Create 5-minute hold
+  const booking_ref = draft.booking_ref || makeBookingRef();
+  draft.booking_ref = booking_ref;
 
-// Create 5-minute hold
-const booking_ref = draft.booking_ref || makeBookingRef();
-draft.booking_ref = booking_ref;
+  // Human-visible title in GCal list
+  const stylistId = draft.stylist_id || "";
+  const stylistName = draft.stylist_name || "";
+  const summary =
+    `${draft.service} — ${draft.first_name || "Guest"}` +
+    (stylistName ? ` — ${stylistName}` : "") +
+    (stylistId ? ` (${stylistId})` : "");
 
-// --- Build human-visible summary (shows in Google Calendar list) ---
-const stylistId = draft.stylist_id;          // e.g. "sty_01"
-const stylistName = draft.stylist_name || ""; // e.g. "Maria"
+  // Machine-readable metadata
+  const privateProps = {
+    source: "salon-bot",
+    booking_ref: draft.booking_ref,
+    stylist_id: stylistId,
+    stylist_name: stylistName,
+    service: draft.service || "",
+    wa_from: draft.from || "",
+  };
 
-// Example output: "Braids — Tatenda — Maria (sty_01)"
-const summary =
-  `${draft.service} — ${draft.first_name || "Guest"}` +
-  (stylistName ? ` — ${stylistName}` : "") +
-  (stylistId ? ` (${stylistId})` : "");
+  // Description (human + machine)
+  const description =
+    `Booked via WhatsApp\n` +
+    `Ref: ${draft.booking_ref}\n\n` +
+    `stylist_id=${stylistId}\n` +
+    `service=${draft.service || ""}\n` +
+    `source=salon-bot\n` +
+    `from=${draft.from || ""}`;
 
-// --- Machine-readable metadata (for wipes/admin/tools) ---
-const privateProps = {
-  source: "salon-bot",
-  booking_ref: draft.booking_ref,
-  stylist_id: stylistId || "",
-  stylist_name: stylistName || "",
-  service: draft.service || "",
-  wa_from: draft.from || "",
-};
+  // Create hold event (tentative) at UTC instants but displayed in tz
+  const ev = await createHoldEvent(draft.calendar_id, {
+    startISO,
+    endISO,
+    timeZone: draft.tz,
+    summary,
+    description,
+    privateProps,
+  });
 
-// Human-friendly + machine-friendly description
-const description =
-  `Booked via WhatsApp\n` +
-  `Ref: ${draft.booking_ref}\n\n` +
-  `stylist_id=${stylistId || ""}\n` +
-  `service=${draft.service || ""}\n` +
-  `source=salon-bot\n` +
-  `from=${draft.from || ""}`;
+  // Save hold details
+  draft.hold_event_id = ev.id;
+  draft.hold_expires_at = Date.now() + 5 * 60 * 1000;
+  draft.booking_status = "awaiting_confirm";
+  draft.hold_idempotency_key = draft.idempotency_key;
 
-// Create hold event (tentative)
-const ev = await createHoldEvent(draft.calendar_id, {
-  startISO,
-  endISO,
-  timeZone: draft.tz,
-  summary,
-  description,
-  privateProps,
-});
+  // Clear any old alt options once we have a hold
+  draft.alt_options = null;
 
-// Save hold details
-draft.hold_event_id = ev.id;
-draft.hold_expires_at = Date.now() + 5 * 60 * 1000;
-draft.booking_status = "awaiting_confirm";
-draft.hold_idempotency_key = draft.idempotency_key;
+  await saveDraft(from, draft);
 
-// Clear any old alt options once we have a hold
-draft.alt_options = null;
-
-await saveDraft(from, draft);
-
-return {
-  draft,
-  reply: `I can hold **${draft.service}** on **${draft.date} ${draft.time}** with **${draft.stylist_name || chosen.name || "a stylist"}** for 5 minutes. Reply **CONFIRM** to book or **CHANGE** for other times.`,
-};
+  return {
+    draft,
+    reply: `I can hold **${draft.service}** on **${draft.date} ${draft.time}** with **${draft.stylist_name || chosen.name || "a stylist"}** for 5 minutes. Reply **CONFIRM** to book or **CHANGE** for other times.`,
+  };
 }
