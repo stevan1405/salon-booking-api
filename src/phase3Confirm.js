@@ -3,6 +3,7 @@ import { loadDraft, saveDraft, incrUtil } from "./redis.js";
 import { confirmEvent, deleteEvent } from "./calendar/googleCalendar.js";
 import { createBookingRecord } from "./airtable/bookings.js";
 import { bookingExistsByRef } from "./airtable/bookingsRead.js";
+import { DateTime } from "luxon";
 
 export async function phase3Confirm({ from }) {
   const draft = await loadDraft(from);
@@ -61,6 +62,7 @@ export async function phase3Confirm({ from }) {
     wa_from: draft.from || "",
   };
 
+  // Confirm + update event details in one call
   // Confirm + update event details in one call
   await confirmEvent(draft.calendar_id, draft.hold_event_id, { summary, privateProps });
 

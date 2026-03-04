@@ -213,6 +213,9 @@ export async function phase3Handle({ from, extracted }) {
   const startISO = toUtcISO(startLocal);
   const endISO = toUtcISO(endLocal);
 
+  draft.hold_start_iso = startISO;
+  draft.hold_end_iso = endISO;
+
   // Load stylists
   const stylists = await getActiveStylists();
 
