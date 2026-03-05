@@ -1,12 +1,28 @@
 // src/phase3Confirm.js
+import { DateTime } from "luxon";
+
 import { loadDraft, saveDraft, incrUtil } from "./redis.js";
 import { confirmEvent, deleteEvent } from "./calendar/googleCalendar.js";
 import { createBookingRecord } from "./airtable/bookings.js";
 import { bookingExistsByRef } from "./airtable/bookingsRead.js";
-import { DateTime } from "luxon";
+
+// Normalize time into HH:mm (same helper as phase3.js)
+function normalizeHHmm(t) {
+  if (!t) return null;
+  const s = String(t).trim();
+  const m = s.match(/^(\d{1,2})(?::(\d{2}))?$/);
+  if (!m) return s;
+  const hh = String(Number(m[1])).padStart(2, "0");
+  const mm = String(m[2] ?? "00").padStart(2, "0");
+  return `${hh}:${mm}`;
+}
 
 export async function phase3Confirm({ from }) {
-  const draft = await loadDraft(from);
+  const draft = (await loadDraft(from)) || {};
+
+  // Normalize time defensively (important for Luxon fallback)
+  draft.time = normalizeHHmm(draft.time);
+  draft.tz = draft.tz || "Africa/Harare";
 
   // Idempotent confirm: if already booked, do nothing
   if (draft.booking_status === "booked" && draft.event_id) {
@@ -34,6 +50,8 @@ export async function phase3Confirm({ from }) {
     draft.hold_event_id = null;
     draft.hold_expires_at = null;
     draft.hold_idempotency_key = null;
+    draft.hold_start_iso = null;
+    draft.hold_end_iso = null;
 
     // #4: clear event_id only if not booked
     if (draft.booking_status !== "booked") {
@@ -47,7 +65,7 @@ export async function phase3Confirm({ from }) {
   }
 
   // Build the same summary/props on confirm (so calendar entry stays consistent)
-  const stylistName = draft.stylist_name || ""; // if you stored it; otherwise leave ""
+  const stylistName = draft.stylist_name || "";
   const summary =
     `${draft.service} — ${draft.first_name || "Guest"}` +
     (stylistName ? ` — ${stylistName}` : "") +
@@ -63,7 +81,6 @@ export async function phase3Confirm({ from }) {
   };
 
   // Confirm + update event details in one call
-  // Confirm + update event details in one call
   await confirmEvent(draft.calendar_id, draft.hold_event_id, { summary, privateProps });
 
   // mark booked
@@ -77,9 +94,30 @@ export async function phase3Confirm({ from }) {
     await incrUtil(draft.date, draft.stylist_id, duration);
   }
 
-  // Build ISO timestamps for Airtable record
-  const start = new Date(`${draft.date}T${draft.time}:00`);
-  const end = new Date(start.getTime() + duration * 60000);
+  // --- Build ISO timestamps for Airtable record (timezone-correct) ---
+  // Prefer the exact UTC instants used for the hold.
+  let startIso = draft.hold_start_iso || null;
+  let endIso = draft.hold_end_iso || null;
+
+  // Fallback for older drafts: compute from local time in draft.tz using Luxon
+  if (!startIso || !endIso) {
+    const zone = draft.tz || "Africa/Harare";
+    const t = normalizeHHmm(draft.time);
+
+    const startLocal = DateTime.fromISO(`${draft.date}T${t}`, { zone });
+    if (!startLocal.isValid) {
+      throw new Error(`Invalid local datetime: ${draft.date} ${draft.time} (${zone})`);
+    }
+
+    const endLocal = startLocal.plus({ minutes: Number(duration) });
+    startIso = startLocal.toUTC().toISO();
+    endIso = endLocal.toUTC().toISO();
+
+    // store so other flows stay consistent
+    draft.hold_start_iso = startIso;
+    draft.hold_end_iso = endIso;
+  }
+  // ---------------------------------------------------------------
 
   // Airtable idempotency: don't create duplicate rows
   if (draft.booking_ref && (await bookingExistsByRef(draft.booking_ref))) {
@@ -97,8 +135,8 @@ export async function phase3Confirm({ from }) {
     wa_from: from,
     service_id: draft.service,
     stylist_id: draft.stylist_id,
-    start_iso: start.toISOString(),
-    end_iso: end.toISOString(),
+    start_iso: startIso,
+    end_iso: endIso,
     status: "confirmed",
     gcal_event_id: draft.hold_event_id,
   });
@@ -106,7 +144,7 @@ export async function phase3Confirm({ from }) {
   // store Airtable record id for later cancel/reschedule
   draft.airtable_booking_record_id = created?.id || null;
 
-  // Mark booked
+  // Mark booked (redundant but safe)
   draft.booking_status = "booked";
   draft.event_id = draft.hold_event_id;
 

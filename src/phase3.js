@@ -7,10 +7,6 @@ import { loadDraft, saveDraft, getUtil } from "./redis.js";
 import { isWithinWorkingHours } from "./calendar/workingHours.js";
 import { freeBusy, createHoldEvent } from "./calendar/googleCalendar.js";
 
-function fmt2(n) {
-  return String(n).padStart(2, "0");
-}
-
 function makeBookingRef() {
   return crypto.randomBytes(4).toString("hex").toUpperCase(); // 8 chars
 }
@@ -21,11 +17,30 @@ function idempotencyKey({ from, service, date, time }) {
   return crypto.createHash("sha256").update(raw).digest("hex").slice(0, 24);
 }
 
+// Normalize time into HH:mm
+// Accepts "8:00", "08:00", "8", "08", "8:0" (we'll treat as invalid unless mm is 2 digits)
+function normalizeHHmm(t) {
+  if (!t) return null;
+  const s = String(t).trim();
+
+  // Accept "H", "HH", "H:MM", "HH:MM"
+  const m = s.match(/^(\d{1,2})(?::(\d{2}))?$/);
+  if (!m) return s; // leave as-is; Luxon will produce a clear invalid error
+
+  const hh = String(Number(m[1])).padStart(2, "0");
+  const mm = String(m[2] ?? "00").padStart(2, "0");
+  return `${hh}:${mm}`;
+}
+
 // --- Luxon helpers (timezone-correct) ---
 function makeLocalDT(dateYYYYMMDD, timeHHmm, tz) {
   const zone = tz || "Africa/Harare";
-  const dt = DateTime.fromISO(`${dateYYYYMMDD}T${timeHHmm}`, { zone });
-  if (!dt.isValid) throw new Error(`Invalid local datetime: ${dateYYYYMMDD} ${timeHHmm} (${zone})`);
+  const t = normalizeHHmm(timeHHmm);
+  const dt = DateTime.fromISO(`${dateYYYYMMDD}T${t}`, { zone });
+
+  if (!dt.isValid) {
+    throw new Error(`Invalid local datetime: ${dateYYYYMMDD} ${timeHHmm} (${zone})`);
+  }
   return dt;
 }
 
@@ -79,7 +94,6 @@ async function findNextTeamOptions({
   let cursor = makeLocalDT(dateYYYYMMDD, startTimeHHmm, tz);
 
   for (let i = 0; i < maxSteps && results.length < optionsCount; i++) {
-    // move forward by step (skip i=0 if you already tried requested time)
     cursor = addMinutesDT(cursor, stepMin);
 
     const slotStart = cursor;
@@ -115,7 +129,7 @@ async function findNextTeamOptions({
       free.map(async (s) => ({ s, util: await getUtil(dateYYYYMMDD, s.stylist_id) }))
     );
 
-    // Sort by fairness (same logic as pickFairStylistForSlot but we want "avoid repeats" too)
+    // Sort by fairness, then avoid repeats
     withUtil.sort((a, b) => {
       const am = a.util.booked_minutes || 0;
       const bm = b.util.booked_minutes || 0;
@@ -128,11 +142,7 @@ async function findNextTeamOptions({
       return String(a.s.stylist_id || "").localeCompare(String(b.s.stylist_id || ""));
     });
 
-    // Prefer a stylist not already used in options
-    const chosenObj =
-      withUtil.find((x) => !usedStylists.has(x.s.stylist_id)) ||
-      withUtil[0];
-
+    const chosenObj = withUtil.find((x) => !usedStylists.has(x.s.stylist_id)) || withUtil[0];
     if (!chosenObj) continue;
 
     usedStylists.add(chosenObj.s.stylist_id);
@@ -149,14 +159,13 @@ async function findNextTeamOptions({
 }
 
 export async function phase3Handle({ from, extracted }) {
-  // loadDraft might return null/undefined depending on your implementation
   const draft = (await loadDraft(from)) || {};
 
   // Merge fields
   draft.from = from;
   draft.service = extracted?.service ?? draft.service;
   draft.date = extracted?.date ?? draft.date; // YYYY-MM-DD
-  draft.time = extracted?.time ?? draft.time; // HH:mm
+  draft.time = normalizeHHmm(extracted?.time ?? draft.time); // normalize here
   draft.first_name = extracted?.first_name ?? draft.first_name;
   draft.stylist_name = extracted?.stylist_name ?? draft.stylist_name; // optional
   draft.tz = extracted?.tz ?? draft.tz ?? "Africa/Harare";
@@ -209,12 +218,9 @@ export async function phase3Handle({ from, extracted }) {
   const startLocal = makeLocalDT(draft.date, draft.time, draft.tz);
   const endLocal = addMinutesDT(startLocal, dur);
 
-  // Convert to UTC instants for Google/Airtable
+  // Convert to UTC instants for Google/Airtable + FreeBusy
   const startISO = toUtcISO(startLocal);
   const endISO = toUtcISO(endLocal);
-
-  draft.hold_start_iso = startISO;
-  draft.hold_end_iso = endISO;
 
   // Load stylists
   const stylists = await getActiveStylists();
@@ -264,9 +270,12 @@ export async function phase3Handle({ from, extracted }) {
     return busy.length === 0;
   });
 
-  // ---- offer alternatives (30 min increments, 3 options) when no one is free ----
+  // ---- offer alternatives when no one is free ----
   if (!free.length) {
-    // If specific stylist preference, keep current message (we can add specific alternatives next)
+    // Clear any stale hold timing so confirm doesn't reuse it
+    draft.hold_start_iso = null;
+    draft.hold_end_iso = null;
+
     if (pref === "specific") {
       await saveDraft(from, draft);
       return {
@@ -275,9 +284,8 @@ export async function phase3Handle({ from, extracted }) {
       };
     }
 
-    // Team alternatives (any stylist)
     const options = await findNextTeamOptions({
-      stylists: eligible,            // eligible team for that day/working-hours baseline
+      stylists: eligible,
       dateYYYYMMDD: draft.date,
       startTimeHHmm: draft.time,
       durationMin: dur,
@@ -301,8 +309,7 @@ export async function phase3Handle({ from, extracted }) {
       .map((o, idx) => `${idx + 1}) ${o.time} with ${o.stylist_name}`)
       .join("\n");
 
-    // Store the options in draft so reducer can handle "1/2/3" selection next
-    draft.alt_options = options; // [{time, stylist_id, stylist_name, calendar_id}]
+    draft.alt_options = options;
     draft.booking_status = "offering_alts";
     draft.hold_event_id = null;
     draft.hold_expires_at = null;
@@ -337,6 +344,10 @@ export async function phase3Handle({ from, extracted }) {
   // Create 5-minute hold
   const booking_ref = draft.booking_ref || makeBookingRef();
   draft.booking_ref = booking_ref;
+
+  // Save the exact UTC instants used for this hold (IMPORTANT for Airtable confirm)
+  draft.hold_start_iso = startISO;
+  draft.hold_end_iso = endISO;
 
   // Human-visible title in GCal list
   const stylistId = draft.stylist_id || "";
