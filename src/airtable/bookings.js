@@ -1,29 +1,47 @@
-import { airtableCreateRecord } from "./records.js";
+// src/airtable/bookings.js
+import { airtableFetch } from "./client.js";
+
+const BASE_ID = process.env.AIRTABLE_BASE_ID;
+
+function encTable(name) {
+  return encodeURIComponent(name);
+}
 
 export async function createBookingRecord({
   booking_ref,
-  customer_name: first_name,   // NEW
-  first_name,                  // keep for compatibility
+  customer_name,
+  first_name,
   wa_from,
-  service_id,   // for MVP, we’ll store service name here
+  service_id,
   stylist_id,
-  stylist_name,                // NEW
+  stylist_name,
   start_iso,
   end_iso,
   status,
   gcal_event_id,
 }) {
-  // Your bootstrap used text fields for start/end in Bookings (safe).
-  // So store ISO strings.
-  return airtableCreateRecord("Bookings", {
-    booking_ref,
-    first_name,
-    wa_from,
-    service_id,
-    stylist_id,
-    start_iso,
-    end_iso,
-    status,
-    gcal_event_id,
+  if (!BASE_ID) throw new Error("Missing AIRTABLE_BASE_ID");
+
+  const customerName = customer_name || first_name || "";
+
+  const body = {
+    fields: {
+      booking_ref,
+      customer_name: customerName, // NEW preferred field
+      first_name: customerName,    // keep for backward compatibility
+      wa_from,
+      service_id,
+      stylist_id,
+      stylist_name,
+      start_iso,
+      end_iso,
+      status,
+      gcal_event_id,
+    },
+  };
+
+  return airtableFetch(`/v0/${BASE_ID}/${encTable("Bookings")}`, {
+    method: "POST",
+    body: JSON.stringify(body),
   });
 }
