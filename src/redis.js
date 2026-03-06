@@ -74,16 +74,23 @@ export async function decrUtil(dateYYYYMMDD, stylistId, durationMin) {
   return next;
 }
 
+// ---------- Locks (for double-confirm / races) ----------
+
 // Acquire a short-lived lock (SET key value NX PX ttlMs)
-// Returns true if acquired, false if someone else holds it.
+// Returns token if acquired, null if someone else holds it.
 export async function acquireLock(key, ttlMs = 15000) {
+  const r = getRedis();
+  if (!r) return null;
+
   const token = crypto.randomBytes(16).toString("hex");
-  const res = await redis.set(key, token, "PX", ttlMs, "NX");
+  const res = await r.set(key, token, "PX", ttlMs, "NX");
   return res === "OK" ? token : null;
 }
 
 // Release lock only if token matches (safe unlock)
 export async function releaseLock(key, token) {
+  const r = getRedis();
+  if (!r) return false;
   if (!token) return false;
 
   // atomic check-and-del
@@ -94,6 +101,6 @@ export async function releaseLock(key, token) {
       return 0
     end
   `;
-  const res = await redis.eval(lua, 1, key, token);
+  const res = await r.eval(lua, 1, key, token);
   return res === 1;
 }
