@@ -1,5 +1,6 @@
 // src/redis.js
 import Redis from "ioredis";
+import crypto from "node:crypto";
 
 let _redis = null;
 
@@ -71,4 +72,28 @@ export async function decrUtil(dateYYYYMMDD, stylistId, durationMin) {
   };
   await r.set(utilKey(dateYYYYMMDD, stylistId), JSON.stringify(next), "EX", 60 * 60 * 48);
   return next;
+}
+
+// Acquire a short-lived lock (SET key value NX PX ttlMs)
+// Returns true if acquired, false if someone else holds it.
+export async function acquireLock(key, ttlMs = 15000) {
+  const token = crypto.randomBytes(16).toString("hex");
+  const res = await redis.set(key, token, "PX", ttlMs, "NX");
+  return res === "OK" ? token : null;
+}
+
+// Release lock only if token matches (safe unlock)
+export async function releaseLock(key, token) {
+  if (!token) return false;
+
+  // atomic check-and-del
+  const lua = `
+    if redis.call("GET", KEYS[1]) == ARGV[1] then
+      return redis.call("DEL", KEYS[1])
+    else
+      return 0
+    end
+  `;
+  const res = await redis.eval(lua, 1, key, token);
+  return res === 1;
 }

@@ -6,6 +6,7 @@ import { getActiveStylists, getServiceDurationMin } from "./airtable/read.js";
 import { loadDraft, saveDraft, getUtil } from "./redis.js";
 import { isWithinWorkingHours } from "./calendar/workingHours.js";
 import { freeBusy, createHoldEvent } from "./calendar/googleCalendar.js";
+import { deleteEvent } from "./calendar/googleCalendar.js";
 
 function makeBookingRef() {
   return crypto.randomBytes(4).toString("hex").toUpperCase(); // 8 chars
@@ -186,6 +187,30 @@ export async function phase3Handle({ from, extracted }) {
     time: draft.time,
   });
 
+  // --- NEW: cleanup stale/mismatched holds (best effort) ---
+  // Prevents multiple tentative holds piling up in Google Calendar when users retry/change time.
+  const hasHold = draft.booking_status === "awaiting_confirm" && draft.hold_event_id && draft.calendar_id;
+
+  if (hasHold) {
+    const expired = draft.hold_expires_at && Date.now() > draft.hold_expires_at;
+    const mismatched = draft.hold_idempotency_key && draft.hold_idempotency_key !== draft.idempotency_key;
+
+    if ((expired || mismatched) && draft.booking_status !== "booked") {
+      try {
+        await deleteEvent(draft.calendar_id, draft.hold_event_id);
+      } catch {
+        // best effort cleanup
+      }
+
+      draft.hold_event_id = null;
+      draft.hold_expires_at = null;
+      draft.hold_idempotency_key = null;
+      draft.hold_start_iso = null;
+      draft.hold_end_iso = null;
+    }
+  }
+  // --------------------------------------------------------
+
   // If already booked, do not re-run availability or create holds
   if (draft.booking_status === "booked" && draft.event_id) {
     await saveDraft(from, draft);
@@ -252,8 +277,12 @@ export async function phase3Handle({ from, extracted }) {
   );
 
   if (!eligible.length) {
-    await saveDraft(from, draft);
-    return { draft, reply: `No stylists are working at ${draft.time}. Try another time?` };
+  // no hold was created, keep draft clean
+  draft.hold_start_iso = null;
+  draft.hold_end_iso = null;
+
+  await saveDraft(from, draft);
+  return { draft, reply: `No stylists are available at ${draft.time}. Try another time?` };
   }
 
   // FreeBusy check for requested slot (UTC instants)

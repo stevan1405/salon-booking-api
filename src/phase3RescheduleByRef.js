@@ -82,11 +82,19 @@ export async function phase3RescheduleByRef({ booking_ref, new_date, new_time })
 
   // 6) Start NEW booking flow for the new time (new hold + new booking_ref)
   // We drive this through your existing phase3Handle by preparing a clean draft.
-  if (!wa_from) {
-    return { ok: false, reply: `Booking ${booking_ref} has no wa_from; can’t auto-start reschedule flow.` };
-  }
+    const draft = (await loadDraft(wa_from)) || {};
 
-  const draft = await loadDraft(wa_from);
+  // --- NEW: cleanup any existing hold on this WhatsApp thread (best effort) ---
+  // This prevents "double events" if someone reschedules again after a hold expires
+  // and the old hold wasn't deleted (or confirm wasn't called).
+  if (draft.hold_event_id && draft.calendar_id && draft.booking_status !== "booked") {
+    try {
+      await deleteEvent(draft.calendar_id, draft.hold_event_id);
+    } catch {
+      // best effort cleanup
+    }
+  }
+  // --------------------------------------------------------------------------
 
   // Reset state so phase3Handle won't short-circuit as "booked"
   draft.from = wa_from;
@@ -97,10 +105,15 @@ export async function phase3RescheduleByRef({ booking_ref, new_date, new_time })
   draft.hold_event_id = null;
   draft.hold_expires_at = null;
   draft.hold_idempotency_key = null;
+  draft.hold_start_iso = null;
+  draft.hold_end_iso = null;
 
   // IMPORTANT: clear booking_ref so the NEW booking gets a NEW ref
   draft.booking_ref = null;
   draft.airtable_booking_record_id = null;
+
+  // Clear any prior alts
+  draft.alt_options = null;
 
   // Carry forward user/service identity
   draft.first_name = first_name || draft.first_name;
