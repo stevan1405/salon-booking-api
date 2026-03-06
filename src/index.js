@@ -10,10 +10,13 @@ import { phase3CancelByRef } from "./phase3CancelByRef.js";
 import { phase3RescheduleByRef } from "./phase3RescheduleByRef.js";
 import { adminRouter } from "./admin.js";
 import { adminWipeRouter } from "./adminWipe.js";
+import { adminAvailabilityRouter } from "./adminAvailability.js";
 
 
 const app = express();   // 🔥 THIS WAS MISSING
 app.use(express.json());
+
+app.use("/admin", adminAvailabilityRouter);
 
 app.use("/admin", adminRouter);
 app.use("/admin", adminWipeRouter);
