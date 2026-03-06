@@ -42,6 +42,6 @@ export async function createBookingRecord({
 
   return airtableFetch(`/v0/${BASE_ID}/${encTable("Bookings")}`, {
     method: "POST",
-    body: JSON.stringify(body),
+    body,
   });
 }
