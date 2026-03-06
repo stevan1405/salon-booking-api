@@ -2,10 +2,12 @@ import { airtableCreateRecord } from "./records.js";
 
 export async function createBookingRecord({
   booking_ref,
-  first_name,
+  customer_name: first_name,   // NEW
+  first_name,                  // keep for compatibility
   wa_from,
   service_id,   // for MVP, we’ll store service name here
   stylist_id,
+  stylist_name,                // NEW
   start_iso,
   end_iso,
   status,

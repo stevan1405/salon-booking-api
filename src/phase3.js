@@ -382,7 +382,7 @@ export async function phase3Handle({ from, extracted }) {
   const stylistId = draft.stylist_id || "";
   const stylistName = draft.stylist_name || "";
   const summary =
-    `${draft.service} — ${draft.first_name || "Guest"}` +
+    `${draft.service} — ${draft.first_name || draft.customer_name || "Guest"}` +
     (stylistName ? ` — ${stylistName}` : "") +
     (stylistId ? ` (${stylistId})` : "");
 
@@ -392,6 +392,7 @@ export async function phase3Handle({ from, extracted }) {
     booking_ref: draft.booking_ref,
     stylist_id: stylistId,
     stylist_name: stylistName,
+    customer_name: draft.first_name || "",
     service: draft.service || "",
     wa_from: draft.from || "",
   };

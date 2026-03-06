@@ -179,10 +179,12 @@ export async function phase3Confirm({ from }) {
     // Create Airtable record
     const created = await createBookingRecord({
       booking_ref: draft.booking_ref,
+      customer_name: draft.first_name,
       first_name: draft.first_name,
       wa_from: from,
       service_id: draft.service,
       stylist_id: draft.stylist_id,
+      stylist_name: draft.stylist_name,
       start_iso: startIso,
       end_iso: endIso,
       status: "confirmed",

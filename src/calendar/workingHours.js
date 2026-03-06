@@ -1,10 +1,25 @@
 // src/calendar/workingHours.js
 
-// If a stylist has no working hours configured for a given day,
-// we treat them as AVAILABLE (24/7) by default.
-// This lets you support late bookings (e.g. 21:00) and rely on:
-//  - per-stylist working_hours_json when provided
-//  - Google Calendar busy events for actual availability
+function toMin(t) {
+  const [h, m] = String(t).split(":").map(Number);
+  if (!Number.isFinite(h) || !Number.isFinite(m)) return NaN;
+  return h * 60 + m;
+}
+
+function getDayKey(dateYYYYMMDD) {
+  const day = new Date(`${dateYYYYMMDD}T00:00:00`).getDay(); // 0 Sun .. 6 Sat
+  return ["sun", "mon", "tue", "wed", "thu", "fri", "sat"][day];
+}
+
+/**
+ * Returns true if the requested slot [startHHmm, endHHmm] fits inside
+ * one of the stylist's working windows for that day.
+ *
+ * Rules:
+ * - No windows for the day => NOT available
+ * - Supports multiple windows per day
+ * - Supports overnight windows like 22:00 -> 02:00
+ */
 export function isWithinWorkingHours(workingHoursJson, dateYYYYMMDD, startHHmm, endHHmm) {
   let wh;
   try {
@@ -13,31 +28,36 @@ export function isWithinWorkingHours(workingHoursJson, dateYYYYMMDD, startHHmm, 
     wh = {};
   }
 
-  const day = new Date(`${dateYYYYMMDD}T00:00:00`).getDay(); // 0 Sun .. 6 Sat
-  const key = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"][day];
-
+  const key = getDayKey(dateYYYYMMDD);
   const windows = Array.isArray(wh[key]) ? wh[key] : [];
 
-  // ✅ 24/7 default if no windows configured for that day
-  if (windows.length === 0) return true;
-
-  // Compare times as minutes since midnight
-  const toMin = (t) => {
-    const [h, m] = String(t).split(":").map(Number);
-    return h * 60 + m;
-  };
+  // Explicit admin-controlled availability:
+  // if no windows are configured for that day, stylist is off
+  if (windows.length === 0) return false;
 
   const s = toMin(startHHmm);
   const e = toMin(endHHmm);
 
-  // Guard: if parse fails
   if (!Number.isFinite(s) || !Number.isFinite(e)) return false;
 
   return windows.some((w) => {
     if (!w || !w.start || !w.end) return false;
+
     const ws = toMin(w.start);
     const we = toMin(w.end);
+
     if (!Number.isFinite(ws) || !Number.isFinite(we)) return false;
-    return s >= ws && e <= we;
+
+    // Normal same-day window, e.g. 09:00 -> 17:00
+    if (ws <= we) {
+      return s >= ws && e <= we;
+    }
+
+    // Overnight window, e.g. 22:00 -> 02:00
+    // Interpreted as available from ws -> midnight, then midnight -> we
+    // For same-day checks, allow:
+    // - slot fully in late-night portion: s >= ws
+    // - slot fully in early-morning portion: e <= we
+    return s >= ws || e <= we;
   });
 }

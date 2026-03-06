@@ -44,7 +44,7 @@ export async function phase3RescheduleByRef({ booking_ref, new_date, new_time })
   const stylist_id = fields.stylist_id;
   const gcal_event_id = fields.gcal_event_id;
   const wa_from = fields.wa_from;
-  const first_name = fields.first_name;
+  const customer_name = fields.customer_name || fields.first_name;
   const service = fields.service_id; // in your MVP, service_id stores service name
   const start_iso = fields.start_iso;
   const end_iso = fields.end_iso;
@@ -116,7 +116,7 @@ export async function phase3RescheduleByRef({ booking_ref, new_date, new_time })
   draft.alt_options = null;
 
   // Carry forward user/service identity
-  draft.first_name = first_name || draft.first_name;
+  draft.first_name = customer_name || draft.first_name;
   draft.service = service || draft.service;
   draft.date = new_date;
   draft.time = new_time;
