@@ -13,3 +13,38 @@ export async function findBookingByRef(bookingRef) {
 export async function bookingExistsByRef(bookingRef) {
   return !!(await findBookingByRef(bookingRef));
 }
+
+
+/**
+ * Find latest active booking by WhatsApp number.
+ * Used for auto cancel/reschedule when user does not provide booking_ref.
+ */
+export async function findLatestActiveBookingByWaFrom(wa_from) {
+  if (!wa_from) return null;
+
+  const formula = `
+    AND(
+      {wa_from}="${wa_from}",
+      OR(
+        {status}="confirmed",
+        {status}="awaiting_confirm"
+      )
+    )
+  `;
+
+  const data = await airtableFindByFormula(
+    "Bookings",
+    formula,
+    {
+      sort: [{ field: "start_iso", direction: "asc" }],
+      maxRecords: 3
+    }
+  );
+
+  const records = data.records || [];
+
+  if (records.length === 0) return null;
+
+  // return the soonest upcoming booking
+  return records[0];
+}

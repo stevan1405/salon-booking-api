@@ -11,6 +11,8 @@ import { phase3RescheduleByRef } from "./phase3RescheduleByRef.js";
 import { adminRouter } from "./admin.js";
 import { adminWipeRouter } from "./adminWipe.js";
 import { adminAvailabilityRouter } from "./adminAvailability.js";
+import { phase3CancelLatest } from "./routes/phase3_cancel_latest.js";
+import { phase3RescheduleLatest } from "./routes/phase3_reschedule_latest.js";
 
 
 const app = express();   // 🔥 THIS WAS MISSING
@@ -50,11 +52,6 @@ app.get("/oauth2callback", async (req, res) => {
     console.error("[/oauth2callback] failed:", e?.stack || e);
     res.status(500).send(String(e?.message || e));
   }
-});
-
-const port = process.env.PORT || 3000;
-app.listen(port, () => {
-  console.log(`Server running on http://localhost:${port}`);
 });
 
 app.post("/phase3", async (req, res) => {
@@ -132,4 +129,35 @@ app.post("/phase3/reschedule_by_ref", async (req, res) => {
     console.error(e);
     res.status(500).json({ error: "reschedule_failed", message: String(e?.message || e) });
   }
+});
+
+app.post("/phase3/cancel_latest", async (req, res) => {
+  try {
+    const out = await phase3CancelLatest(req.body || {});
+    res.json(out);
+  } catch (e) {
+    console.error("[POST /phase3/cancel_latest]", e);
+    res.status(500).json({
+      error: "cancel_latest_failed",
+      message: String(e?.message || e),
+    });
+  }
+});
+
+app.post("/phase3/reschedule_latest", async (req, res) => {
+  try {
+    const out = await phase3RescheduleLatest(req.body || {});
+    res.json(out);
+  } catch (e) {
+    console.error("[POST /phase3/reschedule_latest]", e);
+    res.status(500).json({
+      error: "reschedule_latest_failed",
+      message: String(e?.message || e),
+    });
+  }
+});
+
+const port = process.env.PORT || 3000;
+app.listen(port, () => {
+  console.log(`Server running on http://localhost:${port}`);
 });
